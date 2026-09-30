@@ -620,6 +620,12 @@ textarea:focus { outline: none; box-shadow: var(--focus-ring); }
                 <span style="font-weight: 700;">Almost. Try once more.</span><span>{{ fr.fb }}</span>
               </div>
             </sc-if>
+            <sc-if value="{{ fr.resOff }}" hint-placeholder-val="{{ false }}">
+              <div style="padding: 14px 16px; border-radius: var(--radius-md); background: var(--color-warning-subtle); color: var(--amber-700); font-size: var(--text-sm); display: flex; flex-direction: column; gap: 6px;">
+                <span style="font-weight: 700;">Answer saved</span><span>{{ fr.fb }}</span>
+                <sc-if value="{{ fr.hasErr }}"><span style="font-family: var(--font-mono); font-size: 12px; word-break: break-word;">{{ fr.errText }}</span></sc-if>
+              </div>
+            </sc-if>
             <sc-if value="{{ fr.resOk }}" hint-placeholder-val="{{ false }}">
               <div style="padding: 14px 16px; border-radius: var(--radius-md); background: var(--color-success-subtle); color: var(--forest-700); font-size: var(--text-sm); display: flex; flex-direction: column; gap: 8px;">
                 <span style="font-weight: 700;">Good answer</span><span>{{ fr.fb }}</span>
@@ -1028,19 +1034,20 @@ class Component extends DCLogic {
     const req = { system: sys, max_tokens: maxTokens || 600, messages: [{ role: 'user', content: user }] };
     let txt;
     if (window.claude) txt = await window.claude.complete(req);
-    else { const r = await fetch(this.aiUrl(), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(req) }); if (!r.ok) throw new Error('ai ' + r.status); txt = (await r.json()).text || ''; }
+    else { const r = await fetch(this.aiUrl(), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(req) }); let jb = null; try { jb = await r.json(); } catch (e) {} if (!r.ok || !jb || jb.error) throw new Error('server ' + r.status + (jb && jb.error ? ': ' + jb.error : '')); txt = jb.text || ''; }
     return JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1));
   }
   async evalOne({ q, text, expect, minTenses, ctx, sample }) {
     const T = this.state.D.TENSES;
-    const fallback = msg => ({ ok: text.split(/\s+/).length >= 3, tenses: expect || [], fb: msg, better: sample || '', offline: true });
-    if (this.props.aiCheck === false || !this.aiOn()) return fallback('Автопроверка выключена. Сравни свой ответ с примером.');
+    const fallback = msg => ({ ok: text.split(/\s+/).length >= 3, tenses: [], fb: msg, better: sample || '', offline: true });
+    if (this.props.aiCheck === false) return fallback('Автопроверка выключена. Сравни свой ответ с примером.');
+    if (!this.aiOn()) return fallback('Автопроверка не подключена: игра не получила адрес AI-сервера. Сравни свой ответ с примером.');
     try {
       const want = minTenses ? `Requirement: the learner must correctly use at least ${minTenses} different tenses from the list.` : `Expected tense for this question: ${(expect || []).map(t => T[t].name).join(' or ')}.`;
       const j = await this.ai(`Story context: ${ctx}\nQuestion: ${q}\n${want}\nLearner's answer: """${text}"""\n\nReturn {"ok": boolean (true if the answer fits the question and ${minTenses ? 'the requirement is met' : 'the expected tense is used correctly'}), "tenses": [ids of tenses used correctly], "feedback_ru": string, "better": string (the learner's answer corrected or slightly improved, in English, keeping their ideas)}`);
       const tenses = Array.isArray(j.tenses) ? j.tenses.filter(t => T[t]) : [];
       return { ok: !!j.ok && (!minTenses || tenses.length >= minTenses), tenses, fb: j.feedback_ru || '', better: j.better || '' };
-    } catch (e) { console.warn(e); return fallback('Автопроверка сейчас недоступна — ответ принят. Сравни с примером.'); }
+    } catch (e) { console.warn(e); return Object.assign(fallback('Автопроверка не ответила — ответ принят. Сравни с примером.'), { err: String(e && e.message || e).slice(0, 200) }); }
   }
   async checkFree() {
     const text = this.state.text.trim(); if (!text || this.state.busy) return;
@@ -1063,7 +1070,7 @@ class Component extends DCLogic {
       const list = D.STATIONS.map((s, i) => `${i + 1}. ${s.city} — event: ${s.finalEvent}. Task: ${D.TENSES[cues[i]].cue} (expected ${D.TENSES[cues[i]].name}). Answer: """${texts[i]}"""`).join('\n');
       const j = await this.ai(`The learner is telling the complete story of their journey, one sentence per city.\n${list}\n\nReturn {"results": [6 objects in order, each {"ok": boolean (fits the task and the expected tense is used correctly), "feedback_ru": string, "better": string}]}`, 1400);
       results = D.STATIONS.map((s, i) => { const r = (j.results || [])[i] || {}; return { ok: !!r.ok, fb: r.feedback_ru || '', better: r.better || '' }; });
-    } catch (e) { results = texts.map(t => ({ ok: t.split(/\s+/).length >= 3, fb: 'Автопроверка недоступна — ответ принят.', better: '', offline: true })); }
+    } catch (e) { const er = String(e && e.message || e).slice(0, 200); results = texts.map(t => ({ ok: t.split(/\s+/).length >= 3, fb: 'Автопроверка не ответила — ответ принят. (' + er + ')', better: '', offline: true })); }
     this.upd(P => { P.final.texts = texts; P.final.res = results; if (results.every(r => r.ok)) cues.forEach(c => { P.eng[c]++; }); else P.final.tries++; }, { busy: false });
   }
   finish() { this.upd(P => { P.finished = true; }, { screen: 'ending' }); }
@@ -1163,7 +1170,7 @@ class Component extends DCLogic {
         hasWords: !!fp.words, words: (fp.words || []).map(w => ({ w })), hasMin: !!fp.minTenses, minNote: fp.minTenses ? `Use at least ${fp.minTenses} different tenses.` : '',
         isMoment: !!fp.moment, moment: fp.moment || {}, mCity: fp.city || '',
         canCheck: !ok && !this.state.busy, busy: this.state.busy, checkLabel: res && !res.ok ? 'Check again' : 'Check my answer', onCheck: () => this.checkFree(),
-        resOk: !!(res && res.ok), resBad: !!(res && !res.ok), fb: res ? res.fb : '', hasBetter: !!(res && res.better), betterLabel: res && res.offline ? 'Example answer' : 'A stronger version', better: res ? res.better : '',
+        resOk: !!(res && res.ok && !res.offline), resOff: !!(res && res.offline), errText: res && res.err ? 'Причина: ' + res.err : '', hasErr: !!(res && res.err), resBad: !!(res && !res.ok && !res.offline), fb: res ? res.fb : '', hasBetter: !!(res && res.better), betterLabel: res && res.offline ? 'Example answer' : 'A stronger version', better: res ? res.better : '',
         tenses: (res ? res.tenses : []).map(t => ({ name: T[t].name })), hasTenses: !!(res && res.tenses && res.tenses.length),
         canSkip: !ok && sub.tries >= 2, onSkip: () => this.skipFree(), done: ok, onNext: () => this.next(), counter: `${R.k + 1} / ${this.count(task)}` };
     }
